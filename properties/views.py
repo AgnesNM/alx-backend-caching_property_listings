@@ -2,25 +2,70 @@ from django.shortcuts import render
 from django.views.decorators.cache import cache_page
 from django.core.paginator import Paginator
 from django.http import JsonResponse
-from django.views.generic import ListView
-from django.utils.decorators import method_decorator
 from .models import Property
+from .utils import get_all_properties, get_property_stats
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @cache_page(60 * 15)  # Cache for 15 minutes (900 seconds)
 def property_list(request):
     """
-    View to display all properties with caching enabled.
+    View to display all properties with page-level caching.
     
-    This view is cached in Redis for 15 minutes to improve performance.
-    The cache key includes the URL and any query parameters.
+    This view uses two levels of caching:
+    1. Page-level caching (@cache_page) - caches the entire HTTP response for 15 minutes
+    2. Low-level caching (get_all_properties) - caches the queryset for 1 hour
+    
+    The page cache is stored with a key that includes URL and query parameters,
+    so different pages and filters are cached separately.
     """
-    # Get all properties ordered by creation date (newest first)
-    properties = Property.objects.all().order_by('-created_at')
+    logger.info("Processing property_list view")
     
-    # Optional: Add pagination
+    # Use the cached queryset from utils.py
+    properties = get_all_properties()
+    
+    # Get cached statistics
+    stats = get_property_stats()
+    
+    # Pagination
     page_number = request.GET.get('page', 1)
     paginator = Paginator(properties, 20)  # Show 20 properties per page
+    page_obj = paginator.get_page(page_number)
+    
+    context = {
+        'properties': page_obj,
+        'total_properties': stats['total_properties'],
+        'avg_price': stats['avg_price'],
+        'max_price': stats['max_price'],
+        'min_price': stats['min_price'],
+        'page_obj': page_obj,
+        'is_paginated': page_obj.has_other_pages(),
+        'cache_info': {
+            'page_cache_duration': '15 minutes',
+            'queryset_cache_duration': '1 hour',
+            'stats_cache_duration': '30 minutes',
+        }
+    }
+    
+    return render(request, 'properties/property_list.html', context)
+
+
+def property_list_no_cache(request):
+    """
+    Property list view without any caching for comparison.
+    
+    This view can be used to compare performance with the cached version.
+    """
+    logger.info("Processing property_list_no_cache view (no caching)")
+    
+    # Direct database query without caching
+    properties = Property.objects.all().order_by('-created_at')
+    
+    # Pagination
+    page_number = request.GET.get('page', 1)
+    paginator = Paginator(properties, 20)
     page_obj = paginator.get_page(page_number)
     
     context = {
@@ -28,6 +73,10 @@ def property_list(request):
         'total_properties': properties.count(),
         'page_obj': page_obj,
         'is_paginated': page_obj.has_other_pages(),
+        'cache_info': {
+            'caching_enabled': False,
+            'note': 'This view has no caching for performance comparison'
+        }
     }
     
     return render(request, 'properties/property_list.html', context)
@@ -39,57 +88,44 @@ def property_list_json(request):
     JSON API view for properties list with caching.
     
     Returns property data in JSON format for API consumption.
-    Cached in Redis for 15 minutes.
+    Uses both page-level and low-level caching.
     """
-    properties = Property.objects.all().order_by('-created_at')
+    logger.info("Processing property_list_json view")
+    
+    # Use cached queryset
+    properties = get_all_properties()
+    stats = get_property_stats()
     
     # Convert to list of dictionaries
     properties_data = []
     for property_obj in properties:
         properties_data.append({
-            'id': property_obj.id,
-            'title': property_obj.title,
-            'description': property_obj.description,
-            'price': str(property_obj.price),
-            'location': property_obj.location,
-            'created_at': property_obj.created_at.isoformat(),
-            'updated_at': property_obj.updated_at.isoformat(),
+            'id': property_obj.id if hasattr(property_obj, 'id') else None,
+            'title': property_obj.title if hasattr(property_obj, 'title') else str(property_obj),
+            'description': property_obj.description if hasattr(property_obj, 'description') else '',
+            'price': str(property_obj.price) if hasattr(property_obj, 'price') else '0',
+            'location': property_obj.location if hasattr(property_obj, 'location') else '',
+            'created_at': property_obj.created_at.isoformat() if hasattr(property_obj, 'created_at') else '',
         })
     
     return JsonResponse({
         'properties': properties_data,
         'total_count': len(properties_data),
-        'cached': True,  # Indicates this response is cached
+        'statistics': stats,
+        'cache_info': {
+            'page_cached': True,
+            'queryset_cached': True,
+            'cache_duration': '15 minutes (page), 1 hour (queryset)'
+        }
     })
-
-
-# Class-based view alternative with caching
-@method_decorator(cache_page(60 * 15), name='dispatch')
-class PropertyListView(ListView):
-    """
-    Class-based view for property list with caching.
-    
-    Alternative implementation using Django's ListView.
-    The entire view is cached for 15 minutes.
-    """
-    model = Property
-    template_name = 'properties/property_list.html'
-    context_object_name = 'properties'
-    paginate_by = 20
-    ordering = ['-created_at']
-    
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        context['total_properties'] = Property.objects.count()
-        return context
 
 
 def property_detail(request, property_id):
     """
     View to display a single property detail.
     
-    Note: This view is not cached as individual property details
-    may change more frequently and have user-specific content.
+    This view is not cached as individual property details
+    may have user-specific content or change frequently.
     """
     try:
         property_obj = Property.objects.get(id=property_id)
@@ -102,26 +138,3 @@ def property_detail(request, property_id):
             'error': 'Property not found',
         }
         return render(request, 'properties/property_not_found.html', context, status=404)
-
-
-# Cache management utilities
-def clear_property_list_cache():
-    """
-    Utility function to clear the property list cache.
-    
-    This can be called when properties are added, updated, or deleted
-    to ensure the cached list stays current.
-    """
-    from django.core.cache import cache
-    from django.core.cache.utils import make_template_fragment_key
-    
-    # Clear the cache for the property list view
-    cache_key = make_template_fragment_key('property_list')
-    cache.delete(cache_key)
-    
-    # Also clear any related cache keys
-    cache.delete_many([
-        'property_list_page_1',
-        'property_list_json',
-        'property_count',
-    ])
