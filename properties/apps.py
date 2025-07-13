@@ -22,7 +22,7 @@ class PropertiesConfig(AppConfig):
         """
         try:
             # Import signal handlers to register them
-            from . import signals
+            import properties.signals
             
             # Log that signals have been imported
             import logging
