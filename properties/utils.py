@@ -45,6 +45,83 @@ def get_all_properties():
     return properties_list
 
 
+def get_redis_cache_metrics():
+    """
+    Retrieve and analyze Redis cache hit/miss metrics.
+    
+    This function connects to Redis via django_redis and retrieves cache statistics
+    including keyspace hits, misses, and calculates hit ratio.
+    
+    Returns:
+        dict: A dictionary containing cache metrics:
+            - keyspace_hits: Number of cache hits
+            - keyspace_misses: Number of cache misses
+            - hit_ratio: Cache hit ratio (hits / (hits + misses))
+            - total_requests: Total number of cache requests
+    """
+    try:
+        # Connect to Redis via django_redis
+        from django_redis import get_redis_connection
+        redis_conn = get_redis_connection("default")
+        
+        # Get Redis INFO statistics
+        redis_info = redis_conn.info()
+        
+        # Extract keyspace hits and misses
+        keyspace_hits = redis_info.get('keyspace_hits', 0)
+        keyspace_misses = redis_info.get('keyspace_misses', 0)
+        
+        # Calculate total requests and hit ratio
+        total_requests = keyspace_hits + keyspace_misses
+        
+        if total_requests > 0:
+            hit_ratio = keyspace_hits / total_requests
+        else:
+            hit_ratio = 0.0
+        
+        # Prepare metrics dictionary
+        metrics = {
+            'keyspace_hits': keyspace_hits,
+            'keyspace_misses': keyspace_misses,
+            'hit_ratio': hit_ratio,
+            'total_requests': total_requests,
+            'hit_ratio_percentage': hit_ratio * 100,
+        }
+        
+        # Log the metrics
+        logger.info(
+            f"Redis Cache Metrics - "
+            f"Hits: {keyspace_hits}, "
+            f"Misses: {keyspace_misses}, "
+            f"Hit Ratio: {hit_ratio:.4f} ({hit_ratio * 100:.2f}%), "
+            f"Total Requests: {total_requests}"
+        )
+        
+        return metrics
+        
+    except ImportError as e:
+        logger.error(f"Failed to import django_redis: {e}")
+        return {
+            'error': 'django_redis not available',
+            'keyspace_hits': 0,
+            'keyspace_misses': 0,
+            'hit_ratio': 0.0,
+            'total_requests': 0,
+            'hit_ratio_percentage': 0.0,
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to retrieve Redis cache metrics: {e}")
+        return {
+            'error': str(e),
+            'keyspace_hits': 0,
+            'keyspace_misses': 0,
+            'hit_ratio': 0.0,
+            'total_requests': 0,
+            'hit_ratio_percentage': 0.0,
+        }
+
+
 def invalidate_property_cache():
     """
     Invalidate the property cache.
@@ -77,6 +154,7 @@ def get_property_stats():
     
     total_properties = Property.objects.count()
     if total_properties > 0:
+        from django.db import models
         avg_price = Property.objects.aggregate(
             avg_price=models.Avg('price')
         )['avg_price']
